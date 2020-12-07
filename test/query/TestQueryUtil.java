@@ -129,7 +129,7 @@ public class TestQueryUtil {
   
   @Test
   public void setDataTableScanFilterEnableBoth() throws Exception {
-    when(scanner.getCurrentKey()).thenReturn(new byte[] { 0, 0, 0, 1 });
+    when(scanner.getCurrentKey()).thenReturn(new byte[] { 0, 0, 0, 0, 0, 0, 1 });
     final ByteMap<byte[][]> tags = new ByteMap<byte[][]>();
     tags.put(new byte[] { 0, 0, 1 }, new byte[][] { new byte[] {0, 0, 1} });
     QueryUtil.setDataTableScanFilter(
@@ -139,7 +139,7 @@ public class TestQueryUtil {
         true,
         true,
         0);
-    verify(scanner, times(2)).getCurrentKey();
+    verify(scanner, times(3)).getCurrentKey();
     // TODO - validate the regex and fuzzy filter
     verify(scanner, times(1)).setFilter(any(FilterList.class));
     verify(scanner, times(1)).setStartKey(any(byte[].class));
