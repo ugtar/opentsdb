@@ -712,17 +712,24 @@ class HttpJsonSerializer extends HttpSerializer {
         }
       }
       
+      /**
+       * @return ResolverWriteToBuffer object loaded with DPs
+       */
+      public ResolverWriteToBuffer getWriter() {
+        return new ResolverWriteToBuffer(this.dps);
+      }
+
       /** After the metric and tags have been resolved, this will print the
        * results to the output buffer in the proper format.
        */
-      class WriteToBuffer implements Callback<Object, ArrayList<Object>> {
+      class ResolverWriteToBuffer {
         final DataPoints dps;
         
         /**
          * Default ctor that takes a data point set
          * @param dps Datapoints to print
          */
-        public WriteToBuffer(final DataPoints dps) {
+        public ResolverWriteToBuffer(final DataPoints dps) {
           this.dps = dps;
         }
         
@@ -731,7 +738,7 @@ class HttpJsonSerializer extends HttpSerializer {
          * deferreds don't matter as they will be stored in the class final
          * variables.
          */
-        public Object call(final ArrayList<Object> deferreds) throws Exception {
+        public Object write() throws Exception {
           data_query.getQueryStats().addStat(dps.getQueryIndex(), 
               QueryStat.UID_TO_STRING_TIME, (DateTime.nanoTime() - uid_start));
           final long local_serialization_start = DateTime.nanoTime();
@@ -918,21 +925,110 @@ class HttpJsonSerializer extends HttpSerializer {
             .addCallback(new TagResolver()));
         resolve_deferreds.add(dps.getAggregatedTagsAsync()
             .addCallback(new AggTagResolver()));
-        return Deferred.group(resolve_deferreds)
-            .addCallback(new WriteToBuffer(dps));
+        Deferred.group(resolve_deferreds);
+        return null;
+      }
+    }
+    
+    /**
+     * Callback to trigger DPsResolver write to buffer with data inside
+     */
+    class WriteToBuffer implements Callback<Object, Object> {
+      final DPsResolver _dpsResolver;
+      
+      public WriteToBuffer(final DPsResolver dpsResolver) {
+        _dpsResolver = dpsResolver;
+      }
+      
+      /**
+       * The results of the deferreds don't matter as they will be stored
+       * in the class final variables
+       */
+      public Object call(final Object obj) throws Exception {
+        return _dpsResolver.getWriter().write();
+      }
+      
+    }
+    /**
+     * Chunk callbacks and trigger them when getting close to Deferred MAX_CALLBACK_CHAIN_LENGTH.
+     * Divide task into two parts: collection and json dumping.
+     */
+    class CallbackChunkify {
+      
+      // Deferred callback chain
+      private Deferred<Object> cb_chain;
+      // Deferred callback chain for json dump callbacks
+      private Deferred<Object> cb_chain_json;
+      // Chunks limit
+      private final int LIMIT = (1 << 14) - 2;
+      // Deferred counter to maintain deferred object limit
+      private int size;
+      
+      /**
+       * Default C'tor, sets limit to be Deferred MAX_CALLBACK_CHAIN_LENGTH
+       * @param limit Number of callbacks to store before triggering callbacks
+       */
+      public CallbackChunkify() {
+        initialize();
+      }
+      
+      /** Initlize Deferreds and size counter */
+      private void initialize() {
+        size = 0;
+        cb_chain = new Deferred<Object>();
+        cb_chain_json = new Deferred<Object>();
+      }
+      
+      /**
+       * Add a DPsResolver. First as callback and store it for Json writer
+       * @param resolver DPsResolver to add
+       */
+      void addToChain(final DPsResolver resolver){
+        cb_chain.addCallback(resolver);
+        cb_chain_json.addCallback(new WriteToBuffer(resolver));
+        triggerCallbacks(false, true);
+      }
+      
+      /**
+       * Triggers all remaining callbacks in chain and create a new callback
+       * chain for Json dump
+       * @param final_cb, Final callback to call
+       * @return Deferred object
+       */
+      Deferred<ChannelBuffer> finalize(final Callback final_cb) {
+        // trigger cb chain without reseting it
+        triggerCallbacks(true, false);
+        return cb_chain_json.addCallback(final_cb);
       }
 
+      /**
+       * Check if callbacks reached limit and trigger them.
+       * @param force True iff, avoid check and trigger immediately
+       * @param reset True iff reset callbacks after trigger.
+       *              False when finializing
+       */
+      private void triggerCallbacks(final boolean force, final boolean reset){
+        // Force mode will be activated even if cb_chain is not empty
+        if (force || ++size >= LIMIT) {
+          // trigger the callback chain here
+          cb_chain.callback(null);
+          cb_chain_json.callback(null);
+          if (reset) {
+            initialize();
+          }
+        }
+      }
     }
     
     // We want the serializer to execute serially so we need to create a callback
     // chain so that when one DPsResolver is finished, it triggers the next to
     // start serializing.
-    final Deferred<Object> cb_chain = new Deferred<Object>();
+    final CallbackChunkify cb_chunkify = new CallbackChunkify();
 
     for (DataPoints[] separate_dps : results) {
       for (DataPoints dps : separate_dps) {
         try {
-          cb_chain.addCallback(new DPsResolver(dps));
+          cb_chunkify.addToChain(new DPsResolver(dps));
         } catch (Exception e) {
           throw new RuntimeException("Unexpected error durring resolution", e);
         }
@@ -970,9 +1066,8 @@ class HttpJsonSerializer extends HttpSerializer {
       }
     }
 
-    // trigger the callback chain here
-    cb_chain.callback(null);
-    return cb_chain.addCallback(new FinalCB());
+    // trigger remaining callbacks and triggers json callback chain
+    return cb_chunkify.finalize(new FinalCB());
   }
   
   /**

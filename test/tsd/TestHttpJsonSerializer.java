@@ -375,6 +375,27 @@ public final class TestHttpJsonSerializer {
   }
   
   @Test
+  public void formatQueryAsyncV1Chunks() throws Exception{
+    setupFormatQuery();
+    final HttpQuery query = NettyMocks.getQuery(tsdb, "");
+    final HttpJsonSerializer serdes = new HttpJsonSerializer(query);
+    final TSQuery data_query = getTestQuery(true, false);
+    validateTestQuery(data_query);
+    
+    // Check that JsonSerializer can deal with large number of deferreds
+    final int limit = 35000;
+    final List<DataPoints[]> results = new ArrayList<DataPoints[]>(limit);
+    
+    for (int i=0; i < limit ; i++) {
+      results.add(new DataPoints[] { new MockDataPoints().getMock() });
+    }
+    // Should not raise com.stumbleupon.async.CallbackOverflowError
+    final ChannelBuffer cb = serdes.formatQueryAsyncV1(data_query, results,
+            Collections.<Annotation> emptyList()).joinUninterruptibly();
+    assertNotNull(cb);
+  }
+  
+  @Test
   public void formatQueryAsyncV1woStatsWSummary() throws Exception {
     setupFormatQuery();
     final HttpQuery query = NettyMocks.getQuery(tsdb, "");
